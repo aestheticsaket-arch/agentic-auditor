@@ -1,0 +1,14 @@
+# LangGraph for the multi-agent workflow and memory state
+langgraph
+# LangChain integration specifically for Groq API
+langchain-groq
+# Streamlit for the user interface (Human-in-the-Loop)
+streamlit
+# PyMuPDF to extract raw text from PDFs
+pymupdf
+# Python-dotenv to hide your API keys securely
+python-dotenv
+# Pandas to create and manage the final Excel file
+pandas
+# Openpyxl is required by pandas to write .xlsx files
+openpyxl
