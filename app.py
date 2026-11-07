@@ -34,8 +34,8 @@ class InvoiceData(BaseModel):
 # 2. AGENTS & GRAPH LOGIC
 # ==========================================
 def extractor_agent(state: AuditorState):
-    # Using Groq's current flagship model for strict JSON tool-calling
-    llm = ChatGroq(model="llama-3.3-70b-versatile", temperature=0, max_retries=0)
+    # FIXED: Using the active 120b model to resolve the 404 error
+    llm = ChatGroq(model="openai/gpt-oss-120b", temperature=0, max_retries=0)
     structured_llm = llm.with_structured_output(InvoiceData)
     prompt = f"Extract financial data:\n\n{state['raw_text']}"
     
@@ -56,7 +56,6 @@ def critic_agent(state: AuditorState):
     tax = data.get("tax_amount", 0.0)
     total = data.get("grand_total", 0.0)
     
-    # Mathematical proof to validate the LLM's extraction
     if abs((sub + tax) - total) > 0.1:
         return {"status": "error", "critic_feedback": f"Math mismatch: {sub} + {tax} != {total}"}
     return {"status": "passed", "critic_feedback": ""}
@@ -91,25 +90,20 @@ app = get_graph()
 # 3. SMART INGESTION (PDF + OCR)
 # ==========================================
 def extract_text_from_pdf(uploaded_file):
-    # Read the file bytes once to use for both PyMuPDF and OCR
     file_bytes = uploaded_file.getvalue()
     
-    # 1. Try native digital extraction first (Fastest)
     doc = fitz.open(stream=file_bytes, filetype="pdf")
     text = "".join(page.get_text() for page in doc)
     
-    # 2. If it's a scanned image (text is empty), trigger OCR
     if not text.strip():
         st.toast(f"Scanned document detected: '{uploaded_file.name}'. Running OCR engine...", icon="⚙️")
         
-        # Convert the PDF pages to images and extract text
         images = convert_from_bytes(file_bytes)
         ocr_text = []
         for img in images:
             ocr_text.append(pytesseract.image_to_string(img))
         text = "\n".join(ocr_text)
         
-    # 3. Final Guardrail if the image is completely blank/unreadable
     if not text.strip():
         st.error(f"🛑 Extraction Failed: '{uploaded_file.name}' is completely unreadable.")
         st.stop()
@@ -145,9 +139,8 @@ if uploaded_files:
             thread_config = {"configurable": {"thread_id": st.session_state.thread_id}}
             current_state = app.get_state(thread_config)
             
-            # Scenario A: Graph hasn't started for this file yet
             if not current_state or not current_state.values:
-                time.sleep(2.5) # Rate limit buffer
+                time.sleep(2.5) 
                 
                 raw_pdf_text = extract_text_from_pdf(current_file)
                 initial_state = {"raw_text": raw_pdf_text, "extracted_data": {}, "critic_feedback": "", "status": "", "error_count": 0}
@@ -163,7 +156,6 @@ if uploaded_files:
                     time.sleep(10)
                     st.rerun()
                     
-            # Scenario B: Math Failed. Execution paused for Human Review
             elif current_state.next == ("human_review_node",):
                 st.error(f"⚠️ Anomaly Detected in {current_file.name}: Manual Review Required")
                 st.warning(f"**Critic Engine Note:** {current_state.values.get('critic_feedback')}")
@@ -185,7 +177,6 @@ if uploaded_files:
                         pass
                     st.rerun() 
                     
-            # Scenario C: Graph completed successfully
             elif not current_state.next and current_state.values.get("status") in ["passed", "human_approved"]:
                 final_data = current_state.values.get("extracted_data")
                 final_data["source_file"] = current_file.name
