@@ -3,6 +3,8 @@ import uuid
 import fitz  # PyMuPDF
 import pandas as pd
 import time
+import pytesseract
+from pdf2image import convert_from_bytes
 from typing import TypedDict
 from pydantic import BaseModel, Field
 from langchain_groq import ChatGroq
@@ -32,15 +34,20 @@ class InvoiceData(BaseModel):
 # 2. AGENTS & GRAPH LOGIC
 # ==========================================
 def extractor_agent(state: AuditorState):
-    llm = ChatGroq(model="openai/gpt-oss-20b", temperature=0, max_retries=0)
+    # Using Groq's current flagship model for strict JSON tool-calling
+    llm = ChatGroq(model="llama-3.3-70b-versatile", temperature=0, max_retries=0)
     structured_llm = llm.with_structured_output(InvoiceData)
     prompt = f"Extract financial data:\n\n{state['raw_text']}"
+    
     if state.get("critic_feedback"):
         prompt += f"\n\nERROR TO FIX: {state['critic_feedback']}"
+        
     result = structured_llm.invoke(prompt)
     current_errors = state.get("error_count", 0)
+    
     if state.get("status") == "error":
         current_errors += 1
+        
     return {"extracted_data": result.model_dump(), "status": "pending_review", "error_count": current_errors}
 
 def critic_agent(state: AuditorState):
@@ -48,6 +55,8 @@ def critic_agent(state: AuditorState):
     sub = data.get("subtotal", 0.0)
     tax = data.get("tax_amount", 0.0)
     total = data.get("grand_total", 0.0)
+    
+    # Mathematical proof to validate the LLM's extraction
     if abs((sub + tax) - total) > 0.1:
         return {"status": "error", "critic_feedback": f"Math mismatch: {sub} + {tax} != {total}"}
     return {"status": "passed", "critic_feedback": ""}
@@ -68,25 +77,50 @@ def get_graph():
     workflow.add_node("extractor", extractor_agent)
     workflow.add_node("critic", critic_agent)
     workflow.add_node("human_review_node", human_review_node)
+    
     workflow.add_edge(START, "extractor")
     workflow.add_edge("extractor", "critic")
     workflow.add_conditional_edges("critic", router)
     workflow.add_edge("human_review_node", END)
+    
     return workflow.compile(checkpointer=MemorySaver(), interrupt_before=["human_review_node"])
 
 app = get_graph()
 
+# ==========================================
+# 3. SMART INGESTION (PDF + OCR)
+# ==========================================
 def extract_text_from_pdf(uploaded_file):
-    doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
+    # Read the file bytes once to use for both PyMuPDF and OCR
+    file_bytes = uploaded_file.getvalue()
+    
+    # 1. Try native digital extraction first (Fastest)
+    doc = fitz.open(stream=file_bytes, filetype="pdf")
     text = "".join(page.get_text() for page in doc)
+    
+    # 2. If it's a scanned image (text is empty), trigger OCR
+    if not text.strip():
+        st.toast(f"Scanned document detected: '{uploaded_file.name}'. Running OCR engine...", icon="⚙️")
+        
+        # Convert the PDF pages to images and extract text
+        images = convert_from_bytes(file_bytes)
+        ocr_text = []
+        for img in images:
+            ocr_text.append(pytesseract.image_to_string(img))
+        text = "\n".join(ocr_text)
+        
+    # 3. Final Guardrail if the image is completely blank/unreadable
+    if not text.strip():
+        st.error(f"🛑 Extraction Failed: '{uploaded_file.name}' is completely unreadable.")
+        st.stop()
+        
     return text
 
 # ==========================================
-# 3. ENTERPRISE BATCH QUEUE UI
+# 4. ENTERPRISE BATCH QUEUE UI
 # ==========================================
 st.set_page_config(page_title="FinAudit Pro Batch", page_icon="📊", layout="wide")
 
-# Initialize the queue variables in session state
 if "master_data" not in st.session_state:
     st.session_state.master_data = []      
 if "current_index" not in st.session_state:
@@ -101,7 +135,6 @@ st.title("📊 Enterprise Batch Invoice Processing")
 uploaded_files = st.file_uploader("Upload Invoice Batch (PDFs)", type=["pdf"], accept_multiple_files=True)
 
 if uploaded_files:
-    # Require a button click to start the engine
     if st.button("Start Batch Audit", type="primary") or st.session_state.batch_started:
         st.session_state.batch_started = True
         
@@ -114,8 +147,7 @@ if uploaded_files:
             
             # Scenario A: Graph hasn't started for this file yet
             if not current_state or not current_state.values:
-                # Add a 2.5-second buffer to respect Groq's RPM limit
-                time.sleep(2.5)
+                time.sleep(2.5) # Rate limit buffer
                 
                 raw_pdf_text = extract_text_from_pdf(current_file)
                 initial_state = {"raw_text": raw_pdf_text, "extracted_data": {}, "critic_feedback": "", "status": "", "error_count": 0}
@@ -126,7 +158,6 @@ if uploaded_files:
                             pass
                     st.rerun()
                 except Exception as e:
-                    # Catch the 429 error and pause instead of crashing the app
                     st.error(f"API Error Detected: {e}")
                     st.warning("Groq rate limit hit. Waiting 10 seconds to cool down before retrying...")
                     time.sleep(10)
@@ -144,7 +175,10 @@ if uploaded_files:
                 
                 if st.button("Approve & Continue Batch Queue", type="primary"):
                     corrected_data = current_data.copy()
-                    corrected_data["subtotal"], corrected_data["tax_amount"], corrected_data["grand_total"] = new_sub, new_tax, new_total
+                    corrected_data["subtotal"] = new_sub
+                    corrected_data["tax_amount"] = new_tax
+                    corrected_data["grand_total"] = new_total
+                    
                     app.update_state(thread_config, {"extracted_data": corrected_data})
                     
                     for event in app.stream(None, thread_config):
@@ -161,7 +195,6 @@ if uploaded_files:
                 st.session_state.thread_id = str(uuid.uuid4())
                 st.rerun()
                 
-        # Batch is finished
         else:
             st.success(f"✅ Batch Processing Complete! {len(uploaded_files)} invoices successfully audited.")
             df = pd.DataFrame(st.session_state.master_data)
