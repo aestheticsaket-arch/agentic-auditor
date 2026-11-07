@@ -12,3 +12,6 @@ python-dotenv
 pandas
 # Openpyxl is required by pandas to write .xlsx files
 openpyxl
+pytesseract
+pdf2image
+Pillow
