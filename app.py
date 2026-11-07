@@ -35,7 +35,7 @@ class InvoiceData(BaseModel):
 # ==========================================
 def extractor_agent(state: AuditorState):
     # FIXED: Using the active 120b model to resolve the 404 error
-    llm = ChatGroq(model="openai/gpt-oss-120b", temperature=0, max_retries=0)
+    llm = ChatGroq(model="llama3-8b-8192", temperature=0, max_retries=0)
     structured_llm = llm.with_structured_output(InvoiceData)
     prompt = f"Extract financial data:\n\n{state['raw_text']}"
     
